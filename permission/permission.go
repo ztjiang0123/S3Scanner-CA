@@ -118,6 +118,7 @@ func CheckPermWrite(svc *s3.Client, bucket *bucket.Bucket) (bool, error) {
 			}
 			return false, err
 		}
+		return false, err
 	}
 
 	// Clean up temporary file if it was successful

@@ -22,8 +22,8 @@ func HasCredentials(cfg aws.Config) (bool, string) {
 			if oe.ServiceID != "ec2imds" || oe.OperationName != "GetMetadata" {
 				log.WithFields(log.Fields{"method": "provider.HasCredentials"}).Error(oe.Error())
 			}
-			return false, ""
 		}
+		return false, ""
 	}
 	return true, credentials.AccessKeyID
 }
@@ -36,8 +36,8 @@ func ClientHasCredentials(client *s3.Client) bool {
 			if oe.ServiceID != "ec2imds" || oe.OperationName != "GetMetadata" {
 				log.WithFields(log.Fields{"method": "provider.ClientHasCredentials"}).Error(oe.Error())
 			}
-			return false
 		}
+		return false
 	}
 	return true
 }

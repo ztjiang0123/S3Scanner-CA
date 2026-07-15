@@ -53,8 +53,9 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 
 			b, existsErr := provider.BucketExists(&bucketToScan)
 			if existsErr != nil {
-				log.WithFields(log.Fields{"bucket": b.Name, "step": "checkExists"}).Error(existsErr)
+				log.WithFields(log.Fields{"bucket": bucketToScan.Name, "step": "checkExists"}).Error(existsErr)
 				FailOnError(j.Reject(false), "failed to reject")
+				continue
 			}
 			if b.Exists == bucket.BucketNotExist {
 				// ack the message and skip to the next
@@ -90,6 +91,7 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 				if enumErr != nil {
 					log.Errorf("Error enumerating bucket '%s': %v\nEnumerated objects: %v", b.Name, enumErr, len(b.Objects))
 					FailOnError(j.Reject(false), "failed to reject")
+					continue
 				}
 			}
 

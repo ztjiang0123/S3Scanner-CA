@@ -123,7 +123,6 @@ be called until the IsTruncated field is false
 */
 func enumerateListObjectsV2(client *s3.Client, b *bucket.Bucket) error {
 	var continuationToken *string
-	continuationToken = nil
 	page := 0
 
 	for {
@@ -142,11 +141,19 @@ func enumerateListObjectsV2(client *s3.Client, b *bucket.Bucket) error {
 		}
 
 		for _, obj := range output.Contents {
-			b.Objects = append(b.Objects, bucket.Object{Key: *obj.Key, Size: uint64(*obj.Size)})
-			b.BucketSize += uint64(*obj.Size)
+			var key string
+			if obj.Key != nil {
+				key = *obj.Key
+			}
+			var size uint64
+			if obj.Size != nil {
+				size = uint64(*obj.Size)
+			}
+			b.Objects = append(b.Objects, bucket.Object{Key: key, Size: size})
+			b.BucketSize += size
 		}
 
-		if !*output.IsTruncated {
+		if output.IsTruncated == nil || !*output.IsTruncated {
 			b.ObjectsEnumerated = true
 			break
 		}
@@ -303,6 +310,7 @@ func bucketExists301(client *s3.Client, region string, b *bucket.Bucket) (bool, 
 	if resErr != nil {
 		return false, "", logErr(logFields, resErr)
 	}
+	defer res.Body.Close()
 
 	switch res.StatusCode {
 	case 200:

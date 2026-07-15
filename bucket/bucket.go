@@ -181,16 +181,20 @@ func ReadFromFile(bucketFile string, bucketChan chan Bucket) error {
 
 // ParseACLOutputV2 TODO: probably move this to providers.go
 func (b *Bucket) ParseACLOutputV2(aclOutput *s3.GetBucketAclOutput) error {
-	b.OwnerID = *aclOutput.Owner.ID
-	if aclOutput.Owner.DisplayName != nil {
-		b.OwnerDisplayName = *aclOutput.Owner.DisplayName
+	if aclOutput.Owner != nil {
+		if aclOutput.Owner.ID != nil {
+			b.OwnerID = *aclOutput.Owner.ID
+		}
+		if aclOutput.Owner.DisplayName != nil {
+			b.OwnerDisplayName = *aclOutput.Owner.DisplayName
+		}
 	}
 	// Since we can read the permissions, there should be no unknowns. Set all to denied, then read each grant and
 	// set the corresponding permission to allowed.
 	b.DenyAll()
 
 	for _, g := range aclOutput.Grants {
-		if g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groups.AllUsersGroup {
+		if g.Grantee != nil && g.Grantee.Type == "Group" && g.Grantee.URI != nil && *g.Grantee.URI == groups.AllUsersGroup {
 			switch g.Permission {
 			case types.PermissionRead:
 				b.PermAllUsersRead = PermissionAllowed
@@ -206,7 +210,7 @@ func (b *Bucket) ParseACLOutputV2(aclOutput *s3.GetBucketAclOutput) error {
 				break
 			}
 		}
-		if g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groups.AuthUsersGroup {
+		if g.Grantee != nil && g.Grantee.Type == "Group" && g.Grantee.URI != nil && *g.Grantee.URI == groups.AuthUsersGroup {
 			switch g.Permission {
 			case types.PermissionRead:
 				b.PermAuthUsersRead = PermissionAllowed
