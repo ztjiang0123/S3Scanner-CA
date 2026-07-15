@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/sa7mon/s3scanner/bucket"
@@ -42,13 +41,7 @@ func (p Dreamhost) BucketExists(b *bucket.Bucket) (*bucket.Bucket, error) {
 	if err != nil {
 		return b, err
 	}
-	if exists {
-		b.Exists = bucket.BucketExists
-		b.Region = region
-	} else {
-		b.Exists = bucket.BucketNotExist
-	}
-
+	setBucketExistence(b, exists, region)
 	return b, nil
 }
 
@@ -62,38 +55,16 @@ func (p Dreamhost) getRegionClient(region string) *s3.Client {
 }
 
 func (p Dreamhost) Enumerate(b *bucket.Bucket) error {
-	if b.Exists != bucket.BucketExists {
-		return errors.New("bucket might not exist")
-	}
-
-	client := p.getRegionClient(b.Region)
-	enumErr := enumerateListObjectsV2(client, b)
-	if enumErr != nil {
-		return enumErr
-	}
-	return nil
+	return enumerateBucketObjects(p.clients, b)
 }
 
 func (p *Dreamhost) newClients() (*clientmap.ClientMap, error) {
-	clients := clientmap.WithCapacity(len(ProviderRegions[p.Name()]))
-	for _, r := range ProviderRegions[p.Name()] {
-		client, err := newNonAWSClient(p, fmt.Sprintf("https://objects-%s.dream.io", r))
-		if err != nil {
-			return nil, err
-		}
-		clients.Set(r, false, client)
-	}
-
-	return clients, nil
+	return buildRegionClients(p, ProviderRegions[p.Name()], func(r string) string {
+		return fmt.Sprintf("https://objects-%s.dream.io", r)
+	})
 }
 
 func NewProviderDreamhost() (*Dreamhost, error) {
 	pd := new(Dreamhost)
-
-	clients, err := pd.newClients()
-	if err != nil {
-		return pd, err
-	}
-	pd.clients = clients
-	return pd, nil
+	return initClients(pd, &pd.clients, pd.newClients)
 }

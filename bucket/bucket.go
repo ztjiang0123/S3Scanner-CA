@@ -181,53 +181,74 @@ func ReadFromFile(bucketFile string, bucketChan chan Bucket) error {
 
 // ParseACLOutputV2 TODO: probably move this to providers.go
 func (b *Bucket) ParseACLOutputV2(aclOutput *s3.GetBucketAclOutput) error {
-	if aclOutput.Owner != nil {
-		if aclOutput.Owner.ID != nil {
-			b.OwnerID = *aclOutput.Owner.ID
-		}
-		if aclOutput.Owner.DisplayName != nil {
-			b.OwnerDisplayName = *aclOutput.Owner.DisplayName
-		}
-	}
+	b.setOwner(aclOutput.Owner)
+
 	// Since we can read the permissions, there should be no unknowns. Set all to denied, then read each grant and
 	// set the corresponding permission to allowed.
 	b.DenyAll()
 
 	for _, g := range aclOutput.Grants {
-		if g.Grantee != nil && g.Grantee.Type == "Group" && g.Grantee.URI != nil && *g.Grantee.URI == groups.AllUsersGroup {
-			switch g.Permission {
-			case types.PermissionRead:
-				b.PermAllUsersRead = PermissionAllowed
-			case types.PermissionWrite:
-				b.PermAllUsersWrite = PermissionAllowed
-			case types.PermissionReadAcp:
-				b.PermAllUsersReadACL = PermissionAllowed
-			case types.PermissionWriteAcp:
-				b.PermAllUsersWriteACL = PermissionAllowed
-			case types.PermissionFullControl:
-				b.PermAllUsersFullControl = PermissionAllowed
-			default:
-				break
-			}
+		group, ok := granteeGroup(g.Grantee)
+		if !ok {
+			continue
 		}
-		if g.Grantee != nil && g.Grantee.Type == "Group" && g.Grantee.URI != nil && *g.Grantee.URI == groups.AuthUsersGroup {
-			switch g.Permission {
-			case types.PermissionRead:
-				b.PermAuthUsersRead = PermissionAllowed
-			case types.PermissionWrite:
-				b.PermAuthUsersWrite = PermissionAllowed
-			case types.PermissionReadAcp:
-				b.PermAuthUsersReadACL = PermissionAllowed
-			case types.PermissionWriteAcp:
-				b.PermAuthUsersWriteACL = PermissionAllowed
-			case types.PermissionFullControl:
-				b.PermAuthUsersFullControl = PermissionAllowed
-			default:
-				break
-			}
+		if field := b.permissionField(group, g.Permission); field != nil {
+			*field = PermissionAllowed
 		}
 	}
 	return nil
+}
+
+// setOwner copies the owner ID and display name from an ACL owner when present.
+func (b *Bucket) setOwner(owner *types.Owner) {
+	if owner == nil {
+		return
+	}
+	if owner.ID != nil {
+		b.OwnerID = *owner.ID
+	}
+	if owner.DisplayName != nil {
+		b.OwnerDisplayName = *owner.DisplayName
+	}
+}
+
+// granteeGroup returns the well-known group URI a grantee refers to, or ok=false
+// if the grantee is not one of the groups we track.
+func granteeGroup(grantee *types.Grantee) (string, bool) {
+	if grantee == nil || grantee.Type != "Group" || grantee.URI == nil {
+		return "", false
+	}
+	switch *grantee.URI {
+	case groups.AllUsersGroup, groups.AuthUsersGroup:
+		return *grantee.URI, true
+	default:
+		return "", false
+	}
+}
+
+// permissionField returns a pointer to the bucket permission field for the given
+// group URI and ACL permission, or nil if the pair isn't tracked.
+func (b *Bucket) permissionField(group string, perm types.Permission) *uint8 {
+	fields := map[types.Permission]*uint8{}
+	switch group {
+	case groups.AllUsersGroup:
+		fields = map[types.Permission]*uint8{
+			types.PermissionRead:        &b.PermAllUsersRead,
+			types.PermissionWrite:       &b.PermAllUsersWrite,
+			types.PermissionReadAcp:     &b.PermAllUsersReadACL,
+			types.PermissionWriteAcp:    &b.PermAllUsersWriteACL,
+			types.PermissionFullControl: &b.PermAllUsersFullControl,
+		}
+	case groups.AuthUsersGroup:
+		fields = map[types.Permission]*uint8{
+			types.PermissionRead:        &b.PermAuthUsersRead,
+			types.PermissionWrite:       &b.PermAuthUsersWrite,
+			types.PermissionReadAcp:     &b.PermAuthUsersReadACL,
+			types.PermissionWriteAcp:    &b.PermAuthUsersWriteACL,
+			types.PermissionFullControl: &b.PermAuthUsersFullControl,
+		}
+	}
+	return fields[perm]
 }
 
 // Permission is a convenience method to convert a boolean into either a PermissionAllowed or PermissionDenied

@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -31,13 +30,7 @@ func (pdo DigitalOcean) BucketExists(b *bucket.Bucket) (*bucket.Bucket, error) {
 	if err != nil {
 		return b, err
 	}
-	if exists {
-		b.Exists = bucket.BucketExists
-		b.Region = region
-	} else {
-		b.Exists = bucket.BucketNotExist
-	}
-
+	setBucketExistence(b, exists, region)
 	return b, nil
 }
 
@@ -47,29 +40,13 @@ func (pdo DigitalOcean) Scan(bucket *bucket.Bucket, doDestructiveChecks bool) er
 }
 
 func (pdo DigitalOcean) Enumerate(b *bucket.Bucket) error {
-	if b.Exists != bucket.BucketExists {
-		return errors.New("bucket might not exist")
-	}
-
-	client := pdo.getRegionClient(b.Region)
-	enumErr := enumerateListObjectsV2(client, b)
-	if enumErr != nil {
-		return enumErr
-	}
-	return nil
+	return enumerateBucketObjects(pdo.clients, b)
 }
 
 func (pdo *DigitalOcean) newClients() (*clientmap.ClientMap, error) {
-	clients := clientmap.WithCapacity(len(ProviderRegions[pdo.Name()]))
-	for _, r := range ProviderRegions[pdo.Name()] {
-		client, err := newNonAWSClient(pdo, fmt.Sprintf("https://%s.digitaloceanspaces.com", r))
-		if err != nil {
-			return nil, err
-		}
-		clients.Set(r, false, client)
-	}
-
-	return clients, nil
+	return buildRegionClients(pdo, ProviderRegions[pdo.Name()], func(r string) string {
+		return fmt.Sprintf("https://%s.digitaloceanspaces.com", r)
+	})
 }
 
 func (pdo *DigitalOcean) getRegionClient(region string) *s3.Client {
@@ -78,11 +55,5 @@ func (pdo *DigitalOcean) getRegionClient(region string) *s3.Client {
 
 func NewDigitalOcean() (*DigitalOcean, error) {
 	pdo := new(DigitalOcean)
-
-	clients, err := pdo.newClients()
-	if err != nil {
-		return pdo, err
-	}
-	pdo.clients = clients
-	return pdo, nil
+	return initClients(pdo, &pdo.clients, pdo.newClients)
 }

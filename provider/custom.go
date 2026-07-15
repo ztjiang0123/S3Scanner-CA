@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -36,13 +35,7 @@ func (cp CustomProvider) BucketExists(b *bucket.Bucket) (*bucket.Bucket, error) 
 	if err != nil {
 		return b, err
 	}
-	if exists {
-		b.Exists = bucket.BucketExists
-		b.Region = region
-	} else {
-		b.Exists = bucket.BucketNotExist
-	}
-
+	setBucketExistence(b, exists, region)
 	return b, nil
 }
 
@@ -52,19 +45,11 @@ func (cp CustomProvider) Scan(b *bucket.Bucket, doDestructiveChecks bool) error 
 }
 
 func (cp CustomProvider) Enumerate(b *bucket.Bucket) error {
-	if b.Exists != bucket.BucketExists {
-		return errors.New("bucket might not exist")
-	}
-	if b.PermAllUsersRead != bucket.PermissionAllowed {
+	// Custom providers only enumerate when the bucket is publicly readable.
+	if b.Exists == bucket.BucketExists && b.PermAllUsersRead != bucket.PermissionAllowed {
 		return nil
 	}
-
-	client := cp.getRegionClient(b.Region)
-	enumErr := enumerateListObjectsV2(client, b)
-	if enumErr != nil {
-		return enumErr
-	}
-	return nil
+	return enumerateBucketObjects(cp.clients, b)
 }
 
 func (cp *CustomProvider) getRegionClient(region string) *s3.Client {
@@ -98,15 +83,7 @@ func NewCustomProvider(addressStyle string, insecure bool, regions []string, end
 }
 
 func (cp *CustomProvider) newClients() (*clientmap.ClientMap, error) {
-	clients := clientmap.WithCapacity(len(cp.regions))
-	for _, r := range cp.regions {
-		regionURL := strings.ReplaceAll(cp.endpointFormat, "$REGION", r)
-		client, err := newNonAWSClient(cp, regionURL)
-		if err != nil {
-			return nil, err
-		}
-		clients.Set(r, false, client)
-	}
-
-	return clients, nil
+	return buildRegionClients(cp, cp.regions, func(r string) string {
+		return strings.ReplaceAll(cp.endpointFormat, "$REGION", r)
+	})
 }

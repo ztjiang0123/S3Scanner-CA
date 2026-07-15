@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -31,13 +30,7 @@ func (w *Wasabi) BucketExists(b *bucket.Bucket) (*bucket.Bucket, error) {
 	if err != nil {
 		return b, err
 	}
-	if exists {
-		b.Exists = bucket.BucketExists
-		b.Region = region
-	} else {
-		b.Exists = bucket.BucketNotExist
-	}
-
+	setBucketExistence(b, exists, region)
 	return b, nil
 }
 
@@ -47,19 +40,7 @@ func (w *Wasabi) Scan(bucket *bucket.Bucket, doDestructiveChecks bool) error {
 }
 
 func (w *Wasabi) Enumerate(b *bucket.Bucket) error {
-	if b.Exists != bucket.BucketExists {
-		return errors.New("bucket might not exist")
-	}
-	client := w.getRegionClient(b.Region)
-	enumErr := enumerateListObjectsV2(client, b)
-	if enumErr != nil {
-		return enumErr
-	}
-	return nil
-}
-
-func (w *Wasabi) getRegionClient(region string) *s3.Client {
-	return w.clients.Get(region, false)
+	return enumerateBucketObjects(w.clients, b)
 }
 
 func (w *Wasabi) newExistsClient() (*s3.Client, error) {
@@ -102,16 +83,9 @@ func NewProviderWasabi() (*Wasabi, error) {
 }
 
 func (w *Wasabi) newClients() (*clientmap.ClientMap, error) {
-	clients := clientmap.WithCapacity(len(ProviderRegions[w.Name()]))
-	for _, r := range ProviderRegions[w.Name()] {
-		client, err := newNonAWSClient(w, fmt.Sprintf("https://s3.%s.wasabisys.com", r))
-		if err != nil {
-			return nil, err
-		}
-		clients.Set(r, false, client)
-	}
-
-	return clients, nil
+	return buildRegionClients(w, ProviderRegions[w.Name()], func(r string) string {
+		return fmt.Sprintf("https://s3.%s.wasabisys.com", r)
+	})
 }
 
 func (w *Wasabi) Name() string { return "wasabi" }

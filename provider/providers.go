@@ -117,6 +117,58 @@ func newNonAWSClient(sp StorageProvider, regionURL string) (*s3.Client, error) {
 	return s3.NewFromConfig(cfg, addrStyleOption), nil
 }
 
+// setBucketExistence records the result of a bucketExists* check on b. It is
+// shared by every provider's BucketExists implementation so the exists/region
+// bookkeeping lives in exactly one place.
+func setBucketExistence(b *bucket.Bucket, exists bool, region string) {
+	if exists {
+		b.Exists = bucket.BucketExists
+		b.Region = region
+		return
+	}
+	b.Exists = bucket.BucketNotExist
+}
+
+// buildRegionClients creates one anonymous S3 client per region in regions,
+// using endpointFor to build each region's endpoint URL. It replaces the
+// near-identical newClients() bodies previously copied into every non-AWS
+// provider.
+func buildRegionClients(sp StorageProvider, regions []string, endpointFor func(region string) string) (*clientmap.ClientMap, error) {
+	clients := clientmap.WithCapacity(len(regions))
+	for _, r := range regions {
+		client, err := newNonAWSClient(sp, endpointFor(r))
+		if err != nil {
+			return nil, err
+		}
+		clients.Set(r, false, client)
+	}
+	return clients, nil
+}
+
+// initClients builds a provider p that stores its ClientMap in the field
+// pointed to by clientsField, populating it via newClients. It captures the
+// identical "new, populate clients, return" constructor body shared by the
+// non-AWS providers so each NewProvider* is a one-line call.
+func initClients[T StorageProvider](p T, clientsField **clientmap.ClientMap, newClients func() (*clientmap.ClientMap, error)) (T, error) {
+	clients, err := newClients()
+	if err != nil {
+		return p, err
+	}
+	*clientsField = clients
+	return p, nil
+}
+
+// enumerateBucketObjects performs the guard-and-enumerate sequence shared by the
+// non-AWS providers' Enumerate implementations: it verifies the bucket exists,
+// resolves the region client, and lists its objects.
+func enumerateBucketObjects(clients *clientmap.ClientMap, b *bucket.Bucket) error {
+	if b.Exists != bucket.BucketExists {
+		return errors.New("bucket might not exist")
+	}
+	client := clients.Get(b.Region, false)
+	return enumerateListObjectsV2(client, b)
+}
+
 /*
 enumerateListObjectsV2 will enumerate all objects stored in b using the ListObjectsV2 API endpoint. The endpoint will
 be called until the IsTruncated field is false
@@ -218,62 +270,82 @@ func checkPermissions(client *s3.Client, b *bucket.Bucket, doDestructiveChecks b
 	return nil
 }
 
+// probeRegion issues the region-existence request for b against a single region
+// client. Scaleway needs a different request than the other providers.
+func probeRegion(client *s3.Client, b *bucket.Bucket) error {
+	// Unlike other APIs, Scaleway returns '200 OK' to a HEAD request sent to the wrong region for a
+	// bucket that does exist in another region. So instead, we send a GET request for a list of 1 object.
+	// Scaleway will return 404 to the GET request in any region other than the one the bucket belongs to.
+	// See https://github.com/sa7mon/S3Scanner/issues/209 for a better way to fix this.
+	if b.Provider == "scaleway" {
+		_, err := client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+			Bucket:  &b.Name,
+			MaxKeys: aws.Int32(1),
+		})
+		return err
+	}
+	_, err := manager.GetBucketRegion(context.TODO(), client, b.Name)
+	return err
+}
+
+// classifyRegionError interprets the error from a region probe. It returns
+// (result, handled): when handled is true, result is the existence answer for
+// that region; when handled is false, err is a genuine failure to surface.
+func classifyRegionError(regionErr error, region string, logFields log.Fields) (bucketCheckResult, bool, error) {
+	var bnf manager.BucketNotFound // Can be returned from GetBucketRegion()
+	var nsb *types.NoSuchBucket    // Can be returned from ListObjectsV2()
+	var re2 *awshttp.ResponseError
+
+	switch {
+	case errors.As(regionErr, &bnf), errors.As(regionErr, &nsb):
+		log.WithFields(logFields).Debugf("BucketNotFound")
+		return bucketCheckResult{region: region, exists: false}, true, nil
+	case errors.As(regionErr, &re2) && re2.HTTPStatusCode() == 403:
+		log.WithFields(logFields).Debugf("AccessDenied")
+		return bucketCheckResult{region: region, exists: true}, true, nil
+	default:
+		// If regionErr is a ResponseError, only return the unwrapped error i.e. "Method Not Allowed"
+		// Otherwise, return the whole error
+		err := regionErr
+		if errors.As(regionErr, &re2) {
+			err = re2.Unwrap()
+		}
+		log.WithFields(logFields).Debug(fmt.Errorf("unhandled error: %w", regionErr))
+		return bucketCheckResult{}, false, err
+	}
+}
+
+// checkRegion probes a single region for b and reports the outcome on results
+// (existence known) or e (unexpected failure).
+func checkRegion(client *s3.Client, region string, b *bucket.Bucket, results chan<- bucketCheckResult, e chan<- error) {
+	logFields := log.Fields{
+		"bucket_name": b.Name,
+		"region":      region,
+		"method":      "providers.bucketExists()",
+	}
+
+	regionErr := probeRegion(client, b)
+	if regionErr == nil {
+		log.WithFields(logFields).Debugf("no error - bucket exists")
+		results <- bucketCheckResult{region: region, exists: true}
+		return
+	}
+
+	res, handled, err := classifyRegionError(regionErr, region, logFields)
+	if handled {
+		results <- res
+		return
+	}
+	e <- err
+}
+
 // bucketExists takes a bucket name and checks if it exists in any region contained in clients
 func bucketExists(clients *clientmap.ClientMap, b *bucket.Bucket) (bool, string, error) {
 	results := make(chan bucketCheckResult, clients.Len())
 	e := make(chan error, 1)
 
 	clients.Each(func(region string, _ bool, client *s3.Client) {
-		go func(bucketName string, client *s3.Client, region string) {
-			logFields := log.Fields{
-				"bucket_name": b.Name,
-				"region":      region,
-				"method":      "providers.bucketExists()",
-			}
-			var regionErr error
-
-			// Unlike other APIs, Scaleway returns '200 OK' to a HEAD request sent to the wrong region for a
-			// bucket that does exist in another region. So instead, we send a GET request for a list of 1 object.
-			// Scaleway will return 404 to the GET request in any region other than the one the bucket belongs to.
-			// See https://github.com/sa7mon/S3Scanner/issues/209 for a better way to fix this.
-			if b.Provider == "scaleway" {
-				_, regionErr = client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
-					Bucket:  &b.Name,
-					MaxKeys: aws.Int32(1),
-				})
-			} else {
-				_, regionErr = manager.GetBucketRegion(context.TODO(), client, bucketName)
-			}
-
-			if regionErr == nil {
-				log.WithFields(logFields).Debugf("no error - bucket exists")
-				results <- bucketCheckResult{region: region, exists: true}
-				return
-			}
-
-			var bnf manager.BucketNotFound // Can be returned from GetBucketRegion()
-			var nsb *types.NoSuchBucket    // Can be returned from ListObjectsV2()
-			var re2 *awshttp.ResponseError
-			if errors.As(regionErr, &bnf) {
-				log.WithFields(logFields).Debugf("BucketNotFound")
-				results <- bucketCheckResult{region: region, exists: false}
-			} else if errors.As(regionErr, &nsb) {
-				log.WithFields(logFields).Debugf("BucketNotFound")
-				results <- bucketCheckResult{region: region, exists: false}
-			} else if errors.As(regionErr, &re2) && re2.HTTPStatusCode() == 403 {
-				log.WithFields(logFields).Debugf("AccessDenied")
-				results <- bucketCheckResult{region: region, exists: true}
-			} else {
-				// If regionErr is a ResponseError, only return the unwrapped error i.e. "Method Not Allowed"
-				// Otherwise, return the whole error
-				err := regionErr
-				if errors.As(regionErr, &re2) {
-					err = re2.Unwrap()
-				}
-				log.WithFields(logFields).Debug(fmt.Errorf("unhandled error: %w", regionErr))
-				e <- err
-			}
-		}(b.Name, client, region)
+		go checkRegion(client, region, b, results, e)
 	})
 
 	for i := 0; i < clients.Len(); i++ {

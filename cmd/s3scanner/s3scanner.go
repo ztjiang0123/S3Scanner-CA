@@ -105,12 +105,56 @@ func Run(version string) {
 	// https://twin.sh/articles/39/go-concurrency-goroutines-worker-pools-and-throttling-made-simple
 	// https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws#AnonymousCredentials
 
+	registerConfigPaths()
+	registerFlags()
+	flag.Usage = usage
+	flag.Parse()
+
+	if args.Version {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
+	if argsErr := args.Validate(); argsErr != nil {
+		log.Error(argsErr)
+		os.Exit(1)
+	}
+
+	configureLogging(args)
+
+	if configErr := validateConfig(args); configErr != nil {
+		log.Error(configErr)
+		os.Exit(1)
+	}
+
+	p := mustBuildProvider(args)
+	mustConnectDB(args)
+
+	workerConfig := worker.Config{
+		Provider:    p,
+		DoEnumerate: args.DoEnumerate,
+		WriteToDB:   args.WriteToDB,
+		JSON:        args.JSON,
+	}
+
+	if args.UseMq {
+		runMQScan(workerConfig)
+		return
+	}
+	runDirectScan(workerConfig)
+}
+
+// registerConfigPaths tells viper where to look for the config file.
+func registerConfigPaths() {
 	viper.SetConfigName("config") // name of config file (without extension)
 	viper.SetConfigType("yml")    // REQUIRED if the config file does not have the extension in the name
 	for _, p := range configPaths {
 		viper.AddConfigPath(p)
 	}
+}
 
+// registerFlags binds every command-line flag to its field on args.
+func registerFlags() {
 	flag.StringVar(&args.ProviderFlag, "provider", "aws", fmt.Sprintf(
 		"Object storage provider: %s - custom requires config file.",
 		strings.Join(provider.AllProviders, ", ")))
@@ -125,22 +169,10 @@ func Run(version string) {
 	flag.IntVar(&args.Threads, "threads", 4, "Number of threads to scan with.")
 	flag.BoolVar(&args.Verbose, "verbose", false, "Enable verbose logging.")
 	flag.BoolVar(&args.Version, "version", false, "Print version")
+}
 
-	flag.Usage = usage
-	flag.Parse()
-
-	if args.Version {
-		fmt.Println(version)
-		os.Exit(0)
-	}
-
-	argsErr := args.Validate()
-	if argsErr != nil {
-		log.Error(argsErr)
-		os.Exit(1)
-	}
-
-	// Configure logging
+// configureLogging sets the log level, output, and formatter from args.
+func configureLogging(args ArgCollection) {
 	log.SetLevel(log.InfoLevel)
 	if args.Verbose {
 		log.SetLevel(log.DebugLevel)
@@ -151,78 +183,93 @@ func Run(version string) {
 	} else {
 		log.SetFormatter(&log.TextFormatter{DisableTimestamp: true})
 	}
+}
 
-	var p provider.StorageProvider
-	var err error
-	configErr := validateConfig(args)
-	if configErr != nil {
-		log.Error(configErr)
-		os.Exit(1)
-	}
+// mustBuildProvider constructs the configured storage provider, exiting the
+// process on any error.
+func mustBuildProvider(args ArgCollection) provider.StorageProvider {
+	var (
+		p   provider.StorageProvider
+		err error
+	)
 	if args.ProviderFlag == "custom" {
-		if viper.IsSet("providers.custom") {
-			log.Debug("found custom provider")
-			p, err = provider.NewCustomProvider(
-				viper.GetString("providers.custom.address_style"),
-				viper.GetBool("providers.custom.insecure"),
-				viper.GetStringSlice("providers.custom.regions"),
-				viper.GetString("providers.custom.endpoint_format"))
-			if err != nil {
-				log.Error(err)
-				os.Exit(1)
-			}
+		if !viper.IsSet("providers.custom") {
+			return nil
 		}
+		log.Debug("found custom provider")
+		p, err = provider.NewCustomProvider(
+			viper.GetString("providers.custom.address_style"),
+			viper.GetBool("providers.custom.insecure"),
+			viper.GetStringSlice("providers.custom.regions"),
+			viper.GetString("providers.custom.endpoint_format"))
 	} else {
 		p, err = provider.NewProvider(args.ProviderFlag)
+	}
+	if err != nil {
+		log.Error(err)
+		os.Exit(1)
+	}
+	return p
+}
+
+// mustConnectDB opens the database connection when results are written to a
+// database, exiting the process on failure.
+func mustConnectDB(args ArgCollection) {
+	if !args.WriteToDB {
+		return
+	}
+	dbConfig := viper.GetString("db.uri")
+	log.Debugf("using database URI from config: %s", dbConfig)
+	if dbErr := db.Connect(dbConfig, true); dbErr != nil {
+		log.Error(dbErr)
+		os.Exit(1)
+	}
+}
+
+// runDirectScan scans the buckets named on the command line or in a file.
+func runDirectScan(workerConfig worker.Config) {
+	var wg sync.WaitGroup
+	buckets := make(chan bucket.Bucket)
+
+	for i := 0; i < args.Threads; i++ {
+		wg.Add(1)
+		go worker.Work(&wg, buckets, workerConfig)
+	}
+
+	feedBuckets(buckets)
+
+	wg.Wait()
+	os.Exit(0)
+}
+
+// feedBuckets sends the requested bucket(s) into buckets and closes the channel.
+func feedBuckets(buckets chan bucket.Bucket) {
+	if args.BucketFile != "" {
+		err := bucket.ReadFromFile(args.BucketFile, buckets)
+		close(buckets)
 		if err != nil {
 			log.Error(err)
 			os.Exit(1)
 		}
+		return
 	}
 
-	// Setup database connection
-	if args.WriteToDB {
-		dbConfig := viper.GetString("db.uri")
-		log.Debugf("using database URI from config: %s", dbConfig)
-		dbErr := db.Connect(dbConfig, true)
-		if dbErr != nil {
-			log.Error(dbErr)
-			os.Exit(1)
-		}
+	if args.BucketName == "" {
+		close(buckets)
+		return
 	}
 
-	var wg sync.WaitGroup
-
-	if !args.UseMq {
-		buckets := make(chan bucket.Bucket)
-
-		for i := 0; i < args.Threads; i++ {
-			wg.Add(1)
-			go worker.Work(&wg, buckets, p, args.DoEnumerate, args.WriteToDB, args.JSON)
-		}
-
-		if args.BucketFile != "" {
-			err := bucket.ReadFromFile(args.BucketFile, buckets)
-			close(buckets)
-			if err != nil {
-				log.Error(err)
-				os.Exit(1)
-			}
-		} else if args.BucketName != "" {
-			if !bucket.IsValidS3BucketName(args.BucketName) {
-				log.Info(fmt.Sprintf("invalid   | %s", args.BucketName))
-				os.Exit(0)
-			}
-			c := bucket.NewBucket(strings.ToLower(args.BucketName))
-			buckets <- c
-			close(buckets)
-		}
-
-		wg.Wait()
+	if !bucket.IsValidS3BucketName(args.BucketName) {
+		log.Info(fmt.Sprintf("invalid   | %s", args.BucketName))
 		os.Exit(0)
 	}
+	buckets <- bucket.NewBucket(strings.ToLower(args.BucketName))
+	close(buckets)
+}
 
-	// Setup mq connection and spin off consumers
+// runMQScan consumes bucket names from RabbitMQ until interrupted.
+func runMQScan(workerConfig worker.Config) {
+	var wg sync.WaitGroup
 	mqURI := viper.GetString("mq.uri")
 	mqName := viper.GetString("mq.queue_name")
 	conn, err := amqp.Dial(mqURI)
@@ -233,7 +280,12 @@ func Run(version string) {
 
 	for i := 0; i < args.Threads; i++ {
 		wg.Add(1)
-		go worker.WorkMQ(i, &wg, conn, p, mqName, args.Threads, args.DoEnumerate, args.WriteToDB)
+		go worker.WorkMQ(&wg, workerConfig, worker.MQConfig{
+			ThreadID: i,
+			Conn:     conn,
+			Queue:    mqName,
+			Threads:  args.Threads,
+		})
 	}
 	log.Printf("Waiting for messages. To exit press CTRL+C")
 	wg.Wait()
