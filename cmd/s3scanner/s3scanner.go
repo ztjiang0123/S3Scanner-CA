@@ -65,10 +65,11 @@ func usage() {
 	})
 
 	// Output all the categories
-	categoriesWriters[CategoryInput].Flush()
-	categoriesWriters[CategoryOutput].Flush()
-	categoriesWriters[CategoryOptions].Flush()
-	categoriesWriters[CategoryDebug].Flush()
+	for _, w := range categoriesWriters {
+		if err := w.Flush(); err != nil {
+			log.Errorf("failed to flush usage writer: %v", err)
+		}
+	}
 	fmt.Fprint(flag.CommandLine.Output(), "INPUT: (1 required)\n", bufferCategoryInput.String())
 	fmt.Fprint(flag.CommandLine.Output(), "\nOUTPUT:\n", bufferCategoryOutput.String())
 	fmt.Fprint(flag.CommandLine.Output(), "\nOPTIONS:\n", bufferCategoryOptions.String())
