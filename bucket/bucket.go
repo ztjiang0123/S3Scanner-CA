@@ -190,40 +190,51 @@ func (b *Bucket) ParseACLOutputV2(aclOutput *s3.GetBucketAclOutput) error {
 	b.DenyAll()
 
 	for _, g := range aclOutput.Grants {
-		if g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groups.AllUsersGroup {
-			switch g.Permission {
-			case types.PermissionRead:
-				b.PermAllUsersRead = PermissionAllowed
-			case types.PermissionWrite:
-				b.PermAllUsersWrite = PermissionAllowed
-			case types.PermissionReadAcp:
-				b.PermAllUsersReadACL = PermissionAllowed
-			case types.PermissionWriteAcp:
-				b.PermAllUsersWriteACL = PermissionAllowed
-			case types.PermissionFullControl:
-				b.PermAllUsersFullControl = PermissionAllowed
-			default:
-				break
-			}
+		if isGroupGrant(g, groups.AllUsersGroup) {
+			b.allowAllUsers(g.Permission)
 		}
-		if g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groups.AuthUsersGroup {
-			switch g.Permission {
-			case types.PermissionRead:
-				b.PermAuthUsersRead = PermissionAllowed
-			case types.PermissionWrite:
-				b.PermAuthUsersWrite = PermissionAllowed
-			case types.PermissionReadAcp:
-				b.PermAuthUsersReadACL = PermissionAllowed
-			case types.PermissionWriteAcp:
-				b.PermAuthUsersWriteACL = PermissionAllowed
-			case types.PermissionFullControl:
-				b.PermAuthUsersFullControl = PermissionAllowed
-			default:
-				break
-			}
+		if isGroupGrant(g, groups.AuthUsersGroup) {
+			b.allowAuthUsers(g.Permission)
 		}
 	}
 	return nil
+}
+
+// isGroupGrant reports whether the grant targets the given S3 predefined group URI.
+func isGroupGrant(g types.Grant, groupURI string) bool {
+	return g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groupURI
+}
+
+// allowAllUsers marks the matching "AllUsers" permission on the bucket as allowed.
+func (b *Bucket) allowAllUsers(perm types.Permission) {
+	switch perm {
+	case types.PermissionRead:
+		b.PermAllUsersRead = PermissionAllowed
+	case types.PermissionWrite:
+		b.PermAllUsersWrite = PermissionAllowed
+	case types.PermissionReadAcp:
+		b.PermAllUsersReadACL = PermissionAllowed
+	case types.PermissionWriteAcp:
+		b.PermAllUsersWriteACL = PermissionAllowed
+	case types.PermissionFullControl:
+		b.PermAllUsersFullControl = PermissionAllowed
+	}
+}
+
+// allowAuthUsers marks the matching "AuthenticatedUsers" permission on the bucket as allowed.
+func (b *Bucket) allowAuthUsers(perm types.Permission) {
+	switch perm {
+	case types.PermissionRead:
+		b.PermAuthUsersRead = PermissionAllowed
+	case types.PermissionWrite:
+		b.PermAuthUsersWrite = PermissionAllowed
+	case types.PermissionReadAcp:
+		b.PermAuthUsersReadACL = PermissionAllowed
+	case types.PermissionWriteAcp:
+		b.PermAuthUsersWriteACL = PermissionAllowed
+	case types.PermissionFullControl:
+		b.PermAuthUsersFullControl = PermissionAllowed
+	}
 }
 
 // Permission is a convenience method to convert a boolean into either a PermissionAllowed or PermissionDenied
