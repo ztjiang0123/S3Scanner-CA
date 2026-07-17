@@ -197,7 +197,7 @@ func Run(version string) {
 
 		for i := 0; i < args.Threads; i++ {
 			wg.Add(1)
-			go worker.Work(&wg, buckets, p, args.DoEnumerate, args.WriteToDB, args.JSON)
+			go worker.Work(&wg, buckets, p, worker.Config{DoEnumerate: args.DoEnumerate, WriteToDB: args.WriteToDB, JSON: args.JSON})
 		}
 
 		if args.BucketFile != "" {

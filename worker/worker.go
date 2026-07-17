@@ -28,8 +28,16 @@ func PrintResult(b *bucket.Bucket, json bool) {
 	log.Info(result)
 }
 
-func Work(wg *sync.WaitGroup, buckets chan bucket.Bucket, provider provider.StorageProvider, doEnumerate bool,
-	writeToDB bool, json bool) {
+// Config groups the behavior flags that control a Work run. These flags always
+// travel together from the caller, so bundling them keeps Work's signature short
+// and its call sites easy to read.
+type Config struct {
+	DoEnumerate bool
+	WriteToDB   bool
+	JSON        bool
+}
+
+func Work(wg *sync.WaitGroup, buckets chan bucket.Bucket, provider provider.StorageProvider, cfg Config) {
 	defer wg.Done()
 	for b1 := range buckets {
 		b, existsErr := provider.BucketExists(&b1)
@@ -39,7 +47,7 @@ func Work(wg *sync.WaitGroup, buckets chan bucket.Bucket, provider provider.Stor
 		}
 
 		if b.Exists == bucket.BucketNotExist {
-			PrintResult(b, json)
+			PrintResult(b, cfg.JSON)
 			continue
 		}
 
@@ -49,7 +57,7 @@ func Work(wg *sync.WaitGroup, buckets chan bucket.Bucket, provider provider.Stor
 			log.WithFields(log.Fields{"bucket": b}).Error(scanErr)
 		}
 
-		if doEnumerate && b.PermAllUsersRead == bucket.PermissionAllowed {
+		if cfg.DoEnumerate && b.PermAllUsersRead == bucket.PermissionAllowed {
 			log.WithFields(log.Fields{"method": "main.work()",
 				"bucket_name": b.Name, "region": b.Region}).Debugf("enumerating objects...")
 			enumErr := provider.Enumerate(b)
@@ -58,9 +66,9 @@ func Work(wg *sync.WaitGroup, buckets chan bucket.Bucket, provider provider.Stor
 				continue
 			}
 		}
-		PrintResult(b, json)
+		PrintResult(b, cfg.JSON)
 
-		if writeToDB {
+		if cfg.WriteToDB {
 			dbErr := db.StoreBucket(b)
 			if dbErr != nil {
 				log.Error(dbErr)
