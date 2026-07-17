@@ -205,36 +205,43 @@ func isGroupGrant(g types.Grant, groupURI string) bool {
 	return g.Grantee != nil && g.Grantee.Type == "Group" && *g.Grantee.URI == groupURI
 }
 
-// allowAllUsers marks the matching "AllUsers" permission on the bucket as allowed.
-func (b *Bucket) allowAllUsers(perm types.Permission) {
+// allowGroupPermission marks the field matching perm (from the provided
+// read/write/readACL/writeACL/fullControl set) as allowed.
+func allowGroupPermission(perm types.Permission, read, write, readACL, writeACL, fullControl *uint8) {
 	switch perm {
 	case types.PermissionRead:
-		b.PermAllUsersRead = PermissionAllowed
+		*read = PermissionAllowed
 	case types.PermissionWrite:
-		b.PermAllUsersWrite = PermissionAllowed
+		*write = PermissionAllowed
 	case types.PermissionReadAcp:
-		b.PermAllUsersReadACL = PermissionAllowed
+		*readACL = PermissionAllowed
 	case types.PermissionWriteAcp:
-		b.PermAllUsersWriteACL = PermissionAllowed
+		*writeACL = PermissionAllowed
 	case types.PermissionFullControl:
-		b.PermAllUsersFullControl = PermissionAllowed
+		*fullControl = PermissionAllowed
 	}
+}
+
+// allowAllUsers marks the matching "AllUsers" permission on the bucket as allowed.
+func (b *Bucket) allowAllUsers(perm types.Permission) {
+	allowGroupPermission(perm,
+		&b.PermAllUsersRead,
+		&b.PermAllUsersWrite,
+		&b.PermAllUsersReadACL,
+		&b.PermAllUsersWriteACL,
+		&b.PermAllUsersFullControl,
+	)
 }
 
 // allowAuthUsers marks the matching "AuthenticatedUsers" permission on the bucket as allowed.
 func (b *Bucket) allowAuthUsers(perm types.Permission) {
-	switch perm {
-	case types.PermissionRead:
-		b.PermAuthUsersRead = PermissionAllowed
-	case types.PermissionWrite:
-		b.PermAuthUsersWrite = PermissionAllowed
-	case types.PermissionReadAcp:
-		b.PermAuthUsersReadACL = PermissionAllowed
-	case types.PermissionWriteAcp:
-		b.PermAuthUsersWriteACL = PermissionAllowed
-	case types.PermissionFullControl:
-		b.PermAuthUsersFullControl = PermissionAllowed
-	}
+	allowGroupPermission(perm,
+		&b.PermAuthUsersRead,
+		&b.PermAuthUsersWrite,
+		&b.PermAuthUsersReadACL,
+		&b.PermAuthUsersWriteACL,
+		&b.PermAuthUsersFullControl,
+	)
 }
 
 // Permission is a convenience method to convert a boolean into either a PermissionAllowed or PermissionDenied
