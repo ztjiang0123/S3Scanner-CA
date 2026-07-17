@@ -83,6 +83,23 @@ func NewProvider(name string) (StorageProvider, error) {
 	return provider, err
 }
 
+// newRegionClients builds a ClientMap containing one non-AWS client per region
+// returned by ProviderRegions[sp.Name()]. endpointForRegion maps a region to the
+// provider-specific endpoint URL used for that region's client.
+func newRegionClients(sp StorageProvider, endpointForRegion func(region string) string) (*clientmap.ClientMap, error) {
+	regions := ProviderRegions[sp.Name()]
+	clients := clientmap.WithCapacity(len(regions))
+	for _, r := range regions {
+		client, err := newNonAWSClient(sp, endpointForRegion(r))
+		if err != nil {
+			return nil, err
+		}
+		clients.Set(r, false, client)
+	}
+
+	return clients, nil
+}
+
 func newNonAWSClient(sp StorageProvider, regionURL string) (*s3.Client, error) {
 	var httpClient s3.HTTPClient
 
