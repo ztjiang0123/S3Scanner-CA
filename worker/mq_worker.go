@@ -19,19 +19,28 @@ func FailOnError(err error, msg string) {
 	}
 }
 
-func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider provider.StorageProvider, queue string,
-	threads int, doEnumerate bool, writeToDB bool) {
+// MQWorkerConfig groups the settings shared by every WorkMQ consumer goroutine.
+type MQWorkerConfig struct {
+	Conn        *amqp.Connection
+	Provider    provider.StorageProvider
+	Queue       string
+	Threads     int
+	DoEnumerate bool
+	WriteToDB   bool
+}
+
+func WorkMQ(threadID int, wg *sync.WaitGroup, cfg MQWorkerConfig) {
 	_, once := os.LookupEnv("TEST_MQ") // If we're being tested, exit after one bucket is scanned
 	defer wg.Done()
 
 	// Wrap the whole thing in a for (while) loop so if the mq server kills the channel, we start it up again
 	for {
-		ch, chErr := mq.Connect(conn, queue, threads, threadID)
+		ch, chErr := mq.Connect(cfg.Conn, cfg.Queue, cfg.Threads, threadID)
 		if chErr != nil {
 			FailOnError(chErr, "couldn't connect to message queue")
 		}
 
-		msgs, consumeErr := ch.Consume(queue, fmt.Sprintf("%s_%v", queue, threadID), false, false, false, false, nil)
+		msgs, consumeErr := ch.Consume(cfg.Queue, fmt.Sprintf("%s_%v", cfg.Queue, threadID), false, false, false, false, nil)
 		if consumeErr != nil {
 			log.Error(fmt.Errorf("failed to register a consumer: %w", consumeErr))
 			return
@@ -51,7 +60,7 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 				continue
 			}
 
-			b, existsErr := provider.BucketExists(&bucketToScan)
+			b, existsErr := cfg.Provider.BucketExists(&bucketToScan)
 			if existsErr != nil {
 				log.WithFields(log.Fields{"bucket": b.Name, "step": "checkExists"}).Error(existsErr)
 				FailOnError(j.Reject(false), "failed to reject")
@@ -63,18 +72,18 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 				continue
 			}
 
-			scanErr := provider.Scan(b, false)
+			scanErr := cfg.Provider.Scan(b, false)
 			if scanErr != nil {
 				log.WithFields(log.Fields{"bucket": b}).Error(scanErr)
 				FailOnError(j.Reject(false), "failed to reject")
 				continue
 			}
 
-			if doEnumerate {
+			if cfg.DoEnumerate {
 				if b.PermAllUsersRead != bucket.PermissionAllowed {
 					PrintResult(&bucketToScan, false)
 					FailOnError(j.Ack(false), "failed to ack")
-					if writeToDB {
+					if cfg.WriteToDB {
 						dbErr := db.StoreBucket(&bucketToScan)
 						if dbErr != nil {
 							log.Error(dbErr)
@@ -86,7 +95,7 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 				log.WithFields(log.Fields{"method": "main.mqwork()",
 					"bucket_name": b.Name, "region": b.Region}).Debugf("enumerating objects...")
 
-				enumErr := provider.Enumerate(b)
+				enumErr := cfg.Provider.Enumerate(b)
 				if enumErr != nil {
 					log.Errorf("Error enumerating bucket '%s': %v\nEnumerated objects: %v", b.Name, enumErr, len(b.Objects))
 					FailOnError(j.Reject(false), "failed to reject")
@@ -104,7 +113,7 @@ func WorkMQ(threadID int, wg *sync.WaitGroup, conn *amqp.Connection, provider pr
 			}
 
 			// Write to database
-			if writeToDB {
+			if cfg.WriteToDB {
 				dbErr := db.StoreBucket(&bucketToScan)
 				if dbErr != nil {
 					log.Error(dbErr)
