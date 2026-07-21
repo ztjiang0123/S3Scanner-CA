@@ -284,6 +284,23 @@ func checkBucketInRegion(b *bucket.Bucket, client *s3.Client, region string, res
 	}
 }
 
+// applyExistsResult records the outcome of a bucket existence check on b. It
+// centralizes the shared logic used by every provider's BucketExists method so
+// that the mapping from a (exists, region, err) triple to the bucket's fields
+// lives in one place. It returns b and err so callers can `return` directly.
+func applyExistsResult(b *bucket.Bucket, exists bool, region string, err error) (*bucket.Bucket, error) {
+	if err != nil {
+		return b, err
+	}
+	if exists {
+		b.Exists = bucket.BucketExists
+		b.Region = region
+	} else {
+		b.Exists = bucket.BucketNotExist
+	}
+	return b, nil
+}
+
 // bucketExists takes a bucket name and checks if it exists in any region contained in clients
 func bucketExists(clients *clientmap.ClientMap, b *bucket.Bucket) (bool, string, error) {
 	results := make(chan bucketCheckResult, clients.Len())
